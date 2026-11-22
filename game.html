@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<!-- PROMPT BREAKOUT — a tiny browser game built from one prompt:
+     "Build me a tiny browser game."
+     Breakout clone in a single file. No dependencies, no network.
+     ?t=<ms> renders the game state at that exact time (for video capture);
+     without it, the game plays live (mouse / arrow keys move the paddle). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Prompt Breakout — built from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0b14; height: 100%; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<script>
+'use strict';
+// ---- deterministic random (seeded, so every capture matches the live game)
+let seed = 1337;
+function rnd() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
+
+// ---- constants
+const W = 1280, H = 720;
+const COLS = 8, ROWS = 5, BRICK_W = 140, BRICK_H = 28, BRICK_GAP = 10;
+const BRICK_TOP = 150, BRICK_LEFT = (W - (COLS * BRICK_W + (COLS - 1) * BRICK_GAP)) / 2;
+const ROW_COLORS = ['#ff5da2', '#ffb347', '#ffe14d', '#4dd7ff', '#7dff6a'];
+const PADDLE_W = 150, PADDLE_H = 16, PADDLE_Y = H - 56;
+const BALL_R = 10;
+
+// ---- state
+function freshState() {
+  const bricks = [];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      bricks.push({ x: BRICK_LEFT + c * (BRICK_W + BRICK_GAP), y: BRICK_TOP + r * (BRICK_H + BRICK_GAP),
+                    alive: true, color: ROW_COLORS[r] });
+  return {
+    t: 0, score: 0, lives: 3,
+    paddleX: W / 2 - PADDLE_W / 2, paddleTarget: W / 2,
+    ball: { x: W / 2, y: H - 140, vx: 260, vy: -300 },
+    bricks, particles: [], trail: [], lastHit: 0,
+  };
+}
+
+function resetBall(s) {
+  s.ball = { x: s.paddleX + PADDLE_W / 2, y: PADDLE_Y - BALL_R - 2, vx: 260, vy: -300 };
+}
+
+function burst(s, x, y, color) {
+  for (let i = 0; i < 10; i++)
+    s.particles.push({ x, y, vx: (rnd() - 0.5) * 420, vy: (rnd() - 0.5) * 420 - 60,
+                       life: 0.5 + rnd() * 0.4, max: 0.9, color });
+}
+
+// ---- fixed-step simulation: dt = 1/120 s, fully deterministic
+function step(s, dt) {
+  s.t += dt;
+  // AI paddle: chase the ball with a small reaction lag, capped speed.
+  const target = Math.max(0, Math.min(W - PADDLE_W, s.ball.x - PADDLE_W / 2));
+  const maxMove = 560 * dt;
+  s.paddleX += Math.max(-maxMove, Math.min(maxMove, target - s.paddleX));
+
+  const b = s.ball;
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
+  if (b.x < BALL_R) { b.x = BALL_R; b.vx = Math.abs(b.vx); }
+  if (b.x > W - BALL_R) { b.x = W - BALL_R; b.vx = -Math.abs(b.vx); }
+  if (b.y < BALL_R + 64) { b.y = BALL_R + 64; b.vy = Math.abs(b.vy); }
+
+  // Paddle bounce: angle depends on where the ball lands on the paddle.
+  if (b.vy > 0 && b.y + BALL_R >= PADDLE_Y && b.y < PADDLE_Y + PADDLE_H &&
+      b.x >= s.paddleX - BALL_R && b.x <= s.paddleX + PADDLE_W + BALL_R) {
+    const off = (b.x - (s.paddleX + PADDLE_W / 2)) / (PADDLE_W / 2);
+    const speed = Math.hypot(b.vx, b.vy) * 1.02;
+    const ang = off * 1.1;
+    b.vx = Math.sin(ang) * speed;
+    b.vy = -Math.abs(Math.cos(ang) * speed);
+    b.y = PADDLE_Y - BALL_R - 1;
+  }
+
+  // Brick hits.
+  for (const br of s.bricks) {
+    if (!br.alive) continue;
+    if (b.x + BALL_R > br.x && b.x - BALL_R < br.x + BRICK_W &&
+        b.y + BALL_R > br.y && b.y - BALL_R < br.y + BRICK_H) {
+      br.alive = false;
+      s.score += 10;
+      burst(s, b.x, b.y, br.color);
+      const overlapTop = (b.y + BALL_R) - br.y, overlapBottom = (br.y + BRICK_H) - (b.y - BALL_R);
+      const overlapLeft = (b.x + BALL_R) - br.x, overlapRight = (br.x + BRICK_W) - (b.x - BALL_R);
+      const m = Math.min(overlapTop, overlapBottom, overlapLeft, overlapRight);
+      if (m === overlapTop) { b.vy = -Math.abs(b.vy); b.y = br.y - BALL_R - 1; }
+      else if (m === overlapBottom) { b.vy = Math.abs(b.vy); b.y = br.y + BRICK_H + BALL_R + 1; }
+      else if (m === overlapLeft) { b.vx = -Math.abs(b.vx); b.x = br.x - BALL_R - 1; }
+      else { b.vx = Math.abs(b.vx); b.x = br.x + BRICK_W + BALL_R + 1; }
+      break;
+    }
+  }
+
+  // Ball lost: lose a life, or celebrate the cleared board.
+  if (b.y - BALL_R > H) {
+    s.lives--;
+    if (s.lives > 0) resetBall(s);
+    else { s.score += 0; s.lives = 3; s.bricks.forEach(br => br.alive = true); resetBall(s); }
+  }
+  if (s.bricks.every(br => !br.alive)) s.bricks.forEach(br => br.alive = true);
+
+  // Particles age; trail follows the ball.
+  s.trail.push({ x: b.x, y: b.y });
+  if (s.trail.length > 14) s.trail.shift();
+  s.particles = s.particles.filter(p => (p.life -= dt) > 0);
+  for (const p of s.particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt; }
+}
+
+function simulateTo(ms) {
+  const s = freshState();
+  const dt = 1 / 120, steps = Math.floor(ms / 1000 / dt);
+  for (let i = 0; i < steps; i++) step(s, dt);
+  return s;
+}
+
+// ---- drawing
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function draw(s) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#141428'); g.addColorStop(1, '#0b0b14');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // HUD
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 34px "DejaVu Sans", sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('SCORE  ' + s.score, 36, 40);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffe14d';
+  ctx.fillText('PROMPT BREAKOUT', W / 2, 40);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#4dd7ff';
+  ctx.fillText('make.fun', W - 36, 40);
+  ctx.textAlign = 'left';
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.arc(52 + i * 30, 78, 7, 0, Math.PI * 2);
+    ctx.fillStyle = i < s.lives ? '#ff5da2' : '#33334d';
+    ctx.fill();
+  }
+  ctx.fillStyle = '#9a9ab5';
+  ctx.font = '400 20px "DejaVu Sans", sans-serif';
+  ctx.fillText('built from one prompt — it actually plays', 36, 116);
+
+  // Bricks
+  for (const br of s.bricks) {
+    if (!br.alive) continue;
+    ctx.fillStyle = br.color;
+    ctx.fillRect(br.x, br.y, BRICK_W, BRICK_H);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(br.x, br.y, BRICK_W, 5);
+  }
+
+  // Particles
+  for (const p of s.particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+  }
+  ctx.globalAlpha = 1;
+
+  // Ball trail + ball
+  s.trail.forEach((p, i) => {
+    ctx.globalAlpha = (i / s.trail.length) * 0.35;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(p.x, p.y, BALL_R * (0.4 + 0.6 * i / s.trail.length), 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#4dd7ff'; ctx.shadowBlur = 18;
+  ctx.beginPath(); ctx.arc(s.ball.x, s.ball.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Paddle
+  const pg = ctx.createLinearGradient(s.paddleX, 0, s.paddleX + PADDLE_W, 0);
+  pg.addColorStop(0, '#4dd7ff'); pg.addColorStop(1, '#ff5da2');
+  ctx.fillStyle = pg;
+  ctx.fillRect(s.paddleX, PADDLE_Y, PADDLE_W, PADDLE_H);
+}
+
+// ---- boot: ?t=<ms> renders one frozen state; otherwise play live.
+const params = new URLSearchParams(location.search);
+const frozen = params.get('t');
+if (frozen !== null) {
+  draw(simulateTo(parseFloat(frozen) || 0));
+} else {
+  const s = freshState();
+  let last = performance.now();
+  let human = false;
+  addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    s.paddleX = Math.max(0, Math.min(W - PADDLE_W, (e.clientX - r.left) * (W / r.width) - PADDLE_W / 2));
+    human = true;
+  });
+  addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') { s.paddleX = Math.max(0, s.paddleX - 34); human = true; }
+    if (e.key === 'ArrowRight') { s.paddleX = Math.min(W - PADDLE_W, s.paddleX + 34); human = true; }
+  });
+  (function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (!human) step(s, dt); else { // human moves the paddle; ball still simulates
+      const save = s.paddleX;
+      step(s, dt);
+      s.paddleX = save;
+    }
+    draw(s);
+    requestAnimationFrame(loop);
+  })(last);
+}
+</script>
+</body>
+</html>
